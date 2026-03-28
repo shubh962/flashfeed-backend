@@ -1,13 +1,31 @@
 const express = require("express");
 const Parser = require("rss-parser");
 const cors = require("cors");
+const axios = require("axios");
+const cheerio = require("cheerio");
 
 const app = express();
 const parser = new Parser();
 
 app.use(cors());
 
-// 👉 News API
+// 🔥 Extract image from article
+async function getImageFromArticle(url) {
+  try {
+    const { data } = await axios.get(url, { timeout: 4000 });
+    const $ = cheerio.load(data);
+
+    const ogImage = $('meta[property="og:image"]').attr("content");
+    if (ogImage) return ogImage;
+
+    const img = $("img").first().attr("src");
+    return img || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+// 👉 API
 app.get("/news", async (req, res) => {
   try {
     const category = (req.query.category || "general").toLowerCase();
@@ -24,38 +42,53 @@ app.get("/news", async (req, res) => {
       general: "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en"
     };
 
-    const feedUrl = urls[category] || urls["general"];
+    const feedUrl = urls[category] || urls.general;
+
     const feed = await parser.parseURL(feedUrl);
 
-    // 🔥 FINAL CLEAN LOGIC
-    const news = feed.items.slice(0, 10).map((item, index) => {
+    const news = await Promise.all(
+      feed.items.slice(0, 5).map(async (item) => {
 
-      // ✅ unique + fast image
-      const image = `https://picsum.photos/600/400?random=${Date.now() + index}`;
+        let image = "";
 
-      return {
-        title: item.title || "",
-        description: item.contentSnippet || "",
-        link: item.link || "",
-        date: item.pubDate || "",
-        imageUrl: image
-      };
-    });
+        if (item.enclosure?.url) {
+          image = item.enclosure.url;
+        }
+
+        if (!image && item.link) {
+          image = await getImageFromArticle(item.link);
+        }
+
+        if (!image) {
+          image = `https://picsum.photos/600/400?random=${Math.random()}`;
+        }
+
+        return {
+          title: item.title || "",
+          description: item.contentSnippet || "",
+          link: item.link || "",
+          date: item.pubDate || "",
+          imageUrl: image
+        };
+      })
+    );
 
     res.json(news);
 
   } catch (error) {
-    console.error("Error fetching news:", error);
+    console.error(error);
     res.status(500).json({ error: "Failed to fetch news" });
   }
 });
 
-// 👉 Root route
+// root
 app.get("/", (req, res) => {
   res.send("News API is running 🚀");
 });
 
-// 👉 Start server
-app.listen(5000, "0.0.0.0", () => {
-  console.log("Server running on http://0.0.0.0:5000");
+// 🔥 FIX HERE (IMPORTANT)
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
