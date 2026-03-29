@@ -8,18 +8,20 @@ const googleTrends = require("google-trends-api");
 const app = express();
 const parser = new Parser();
 
+// 1. Enable CORS for all origins (Crucial for Flutter Web)
 app.use(cors());
 
 /* ---------------- IMAGE EXTRACT ---------------- */
 async function getImageFromArticle(url) {
   try {
-    const { data } = await axios.get(url, { timeout: 4000 });
+    // Some sites block axios; we use a User-Agent to look like a browser
+    const { data } = await axios.get(url, { 
+      timeout: 3000,
+      headers: { 'User-Agent': 'Mozilla/5.0' } 
+    });
     const $ = cheerio.load(data);
-
     const ogImage = $('meta[property="og:image"]').attr("content");
-    if (ogImage) return ogImage;
-
-    return "";
+    return ogImage || "";
   } catch {
     return "";
   }
@@ -30,109 +32,69 @@ async function getTrendingTopics() {
   try {
     const data = await googleTrends.dailyTrends({ geo: "IN" });
     const parsed = JSON.parse(data);
-
-    const trends =
-      parsed.default.trendingSearchesDays[0].trendingSearches;
-
-    return trends.slice(0, 5).map((t) => t.title.query);
+    const trends = parsed.default.trendingSearchesDays[0].trendingSearches;
+    return trends.slice(0, 8).map((t) => t.title.query);
   } catch (e) {
-    console.log("🔥 Trends failed, using fallback");
-
-    return [
-      "India",
-      "Cricket",
-      "Technology",
-      "Bollywood",
-      "Stock Market",
-    ];
+    return ["India", "Cricket", "Technology", "Bollywood", "Finance"];
   }
 }
 
 /* ---------------- NEWS API ---------------- */
 app.get("/news", async (req, res) => {
   try {
-    let category = (req.query.category || "general").toLowerCase();
+    let category = (req.query.category || "all").toLowerCase();
+    let keywordsToSearch = [];
 
-    /* -------- ALL (TRENDING) -------- */
     if (category === "all") {
-      const trends = await getTrendingTopics();
-      const news = [];
-
-      for (let keyword of trends) {
-        try {
-          const feed = await parser.parseURL(
-            `https://news.google.com/rss/search?q=${encodeURIComponent(
-              keyword
-            )}&hl=en-IN&gl=IN&ceid=IN:en`
-          );
-
-          const items = await Promise.all(
-            feed.items.slice(0, 1).map(async (item) => {
-              let image = await getImageFromArticle(item.link);
-
-              if (!image) {
-                image = `https://picsum.photos/600/400?random=${Math.random()}`;
-              }
-
-              return {
-                title: item.title || "",
-                description: item.contentSnippet || "",
-                link: item.link || "",
-                date: item.pubDate || "",
-                imageUrl: image,
-                keyword,
-              };
-            })
-          );
-
-          news.push(...items);
-        } catch (err) {
-          console.log("❌ keyword failed:", keyword);
-        }
-      }
-
-      return res.json(news);
+      keywordsToSearch = await getTrendingTopics();
+    } else {
+      keywordsToSearch = [category];
     }
 
-    /* -------- CATEGORY -------- */
-    const feed = await parser.parseURL(
-      `https://news.google.com/rss/search?q=${category}&hl=en-IN&gl=IN&ceid=IN:en`
-    );
+    const newsResults = [];
 
-    const news = await Promise.all(
-      feed.items.slice(0, 5).map(async (item) => {
-        let image = await getImageFromArticle(item.link);
+    // Fetch news for each keyword
+    for (let keyword of keywordsToSearch) {
+      try {
+        const feed = await parser.parseURL(
+          `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=en-IN&gl=IN&ceid=IN:en`
+        );
 
-        if (!image) {
-          image = `https://picsum.photos/600/400?random=${Math.random()}`;
-        }
+        // Limit articles per keyword to keep response fast
+        const limit = category === "all" ? 2 : 10;
+        const items = await Promise.all(
+          feed.items.slice(0, limit).map(async (item) => {
+            let image = await getImageFromArticle(item.link);
+            
+            return {
+              title: item.title || "",
+              description: item.contentSnippet || "",
+              link: item.link || "",
+              date: item.pubDate || "",
+              imageUrl: image || `https://picsum.photos/600/400?random=${Math.random()}`,
+              keyword: keyword, // 🔥 FIXED: Always include keyword for Flutter mapping
+            };
+          })
+        );
+        newsResults.push(...items);
+      } catch (err) {
+        console.log(`❌ Keyword ${keyword} failed`);
+      }
+    }
 
-        return {
-          title: item.title || "",
-          description: item.contentSnippet || "",
-          link: item.link || "",
-          date: item.pubDate || "",
-          imageUrl: image,
-        };
-      })
-    );
-
-    res.json(news);
+    res.json(newsResults);
 
   } catch (error) {
     console.error("🔥 API ERROR:", error);
-    res.status(500).json({ error: "Failed to fetch news" });
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
-/* ---------------- ROOT ---------------- */
 app.get("/", (req, res) => {
-  res.send("🔥 FlashFeed AI Trending API running");
+  res.send("🚀 FlashFeed Backend is Live!");
 });
 
-/* ---------------- SERVER ---------------- */
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
 });
