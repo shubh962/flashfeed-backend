@@ -10,16 +10,7 @@ app.use(cors());
 app.use(express.json());
 
 const cache = new Map();
-const CACHE_TTL = 5 * 60 * 1000;
-
-function getCache(key) {
-  const entry = cache.get(key);
-  if (entry && Date.now() - entry.time < CACHE_TTL) return entry.data;
-  return null;
-}
-function setCache(key, data) {
-  cache.set(key, { data, time: Date.now() });
-}
+const CACHE_TTL = 10 * 60 * 1000; // 10 min cache for stability
 
 const RSS_SOURCES = {
   india: ["https://news.google.com/rss/search?q=india&hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.feedburner.com/ndtvnews-india-news"],
@@ -27,119 +18,102 @@ const RSS_SOURCES = {
   technology: ["https://news.google.com/rss/search?q=technology&hl=en-IN&gl=IN&ceid=IN:en", "https://techcrunch.com/feed/"],
   business: ["https://news.google.com/rss/search?q=business+india&hl=en-IN&gl=IN&ceid=IN:en", "https://economictimes.indiatimes.com/rssfeedstopstories.cms"],
   sports: ["https://news.google.com/rss/search?q=cricket+ipl+sports&hl=en-IN&gl=IN&ceid=IN:en"],
-  entertainment: ["https://news.google.com/rss/search?q=bollywood+entertainment&hl=en-IN&gl=IN&ceid=IN:en"],
-  science: ["https://news.google.com/rss/search?q=science+isro+space&hl=en-IN&gl=IN&ceid=IN:en"],
-  health: ["https://news.google.com/rss/search?q=health+medical+india&hl=en-IN&gl=IN&ceid=IN:en"],
-  all: ["https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.feedburner.com/ndtvnews-top-stories"],
+  all: ["https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.feedburner.com/ndtvnews-top-stories"]
 };
 
 const FALLBACK_IMAGES = {
-  all: "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=800",
+  all: "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=800"
 };
 
-// ── FIX 1: Resolve Google News URL ──────────────────────────────────────────
-async function resolveGoogleNewsUrl(url) {
+// ── RESOLVE GOOGLE URL ──────────────────────────────────────────────────────
+async function resolveUrl(url) {
   try {
     if (!url.includes("news.google.com")) return url;
-    const res = await axios.get(url, { timeout: 3000, maxRedirects: 5, headers: { "User-Agent": "Mozilla/5.0" } });
-    return res.request?.res?.responseUrl || res.config?.url || url;
+    const res = await axios.get(url, { timeout: 2500, maxRedirects: 5 });
+    return res.request?.res?.responseUrl || url;
   } catch { return url; }
 }
 
-// ── FIX 2: Better Image & Content Extraction ────────────────────────────────
+// ── FETCH IMAGE & BODY (STABLE VERSION) ──────────────────────────────────────
 async function fetchDetails(rawUrl) {
   try {
-    const url = await resolveGoogleNewsUrl(rawUrl);
-    const { data } = await axios.get(url, { timeout: 3000, headers: { "User-Agent": "Mozilla/5.0" } });
+    const url = await resolveUrl(rawUrl);
+    const { data } = await axios.get(url, { 
+      timeout: 3500, // Balanced timeout
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+    });
     const $ = cheerio.load(data);
     
-    const img = $('meta[property="og:image"]').attr("content") || $('meta[name="twitter:image"]').attr("content") || "";
-    
-    // 🔥 NEW: Extract the first substantial paragraph for more depth
+    // 1. Image Priority
+    const img = $('meta[property="og:image"]').attr("content") || 
+                $('meta[name="twitter:image"]').attr("content") || "";
+
+    // 2. Body Text (4-5 lines logic)
     let bodyText = "";
     $('p').each((i, el) => {
-      const text = $(el).text().trim();
-      if (text.length > 100 && bodyText.length < 300) bodyText += text + " ";
+      const txt = $(el).text().trim();
+      if (txt.length > 80 && bodyText.length < 450) bodyText += txt + " ";
     });
 
     return { img, bodyText: bodyText.trim() };
   } catch { return { img: "", bodyText: "" }; }
 }
 
-// ── FIX 3: 4-5 Lines Clean Summary Logic ────────────────────────────────────
-function cleanDescription(itemContent, scrapedBody = "") {
-  // Prefer scraped body text if available, else fallback to RSS snippet
-  let text = scrapedBody.length > 50 ? scrapedBody : (itemContent || "");
-  
-  // Clean HTML and remove common RSS junk
-  let clean = text.replace(/<[^>]*>?/gm, '').replace(/&nbsp;/g, ' ').trim();
-  
-  // If it's still too short, we return a combined version
-  if (clean.length < 150 && itemContent) {
-     clean = itemContent.replace(/<[^>]*>?/gm, '').split('\n')[0];
-  }
-
-  // Return exactly around 350-450 chars for 4-5 lines on mobile
-  return clean.length > 450 ? clean.substring(0, 450) + "..." : clean;
-}
-
-async function fetchImagesParallel(articles, category) {
-  const BATCH = 8;
+// ── PARALLEL PROCESSING (BATCH SIZE 5 FOR STABILITY) ────────────────────────
+async function processArticles(articles, category) {
+  const BATCH = 5; 
   for (let i = 0; i < articles.length; i += BATCH) {
     const batch = articles.slice(i, i + BATCH);
     const details = await Promise.all(batch.map(a => fetchDetails(a.link)));
+    
     details.forEach((det, j) => {
-      articles[i + j].imageUrl = det.img || FALLBACK_IMAGES[category] || FALLBACK_IMAGES.all;
-      // 🔥 Update description with deeper content if found
-      if (det.bodyText) articles[i + j].description = cleanDescription("", det.bodyText);
+      const idx = i + j;
+      articles[idx].imageUrl = det.img || FALLBACK_IMAGES.all;
+      if (det.bodyText && det.bodyText.length > 50) {
+        articles[idx].description = det.bodyText;
+      }
     });
   }
   return articles;
 }
 
-// ── /news Endpoint ──────────────────────────────────────────────────────────
+// ── ENDPOINT ────────────────────────────────────────────────────────────────
 app.get("/news", async (req, res) => {
-  const category = (req.query.category || "all").toLowerCase();
-  const page = parseInt(req.query.page || "1");
-  const limit = parseInt(req.query.limit || "20");
-
-  const cached = getCache(category);
-  if (cached) {
-    const start = (page - 1) * limit;
-    return res.json({ articles: cached.slice(start, start + limit), total: cached.length, hasMore: start + limit < cached.length });
+  const cat = (req.query.category || "all").toLowerCase();
+  
+  if (cache.has(cat)) {
+    const entry = cache.get(cat);
+    if (Date.now() - entry.time < CACHE_TTL) return res.json({ articles: entry.data });
   }
 
   try {
-    const sources = RSS_SOURCES[category] || RSS_SOURCES.all;
-    const feedResults = await Promise.allSettled(sources.map(url => parser.parseURL(url)));
+    const sources = RSS_SOURCES[cat] || RSS_SOURCES.all;
+    const feeds = await Promise.allSettled(sources.map(s => parser.parseURL(s)));
     
-    let allItems = feedResults.filter(r => r.status === "fulfilled").flatMap(r => r.value.items || []);
+    let items = feeds.filter(f => f.status === "fulfilled").flatMap(f => f.value.items || []);
     
-    // Deduplicate and slice
+    // Deduplicate
     const seen = new Set();
-    allItems = allItems.filter(item => {
-      const key = item.title.toLowerCase().substring(0, 30);
+    items = items.filter(it => {
+      const key = it.title.substring(0, 35).toLowerCase();
       return seen.has(key) ? false : seen.add(key);
-    }).slice(0, 60);
+    }).slice(0, 40);
 
-    let articles = allItems.map((item, idx) => ({
-      id: `${category}-${idx}-${Date.now()}`,
-      title: item.title.split(" - ")[0],
-      source: item.title.split(" - ").pop() || "News",
-      description: cleanDescription(item.contentSnippet || item.content),
-      link: item.link,
-      date: item.pubDate,
+    let articles = items.map((it, idx) => ({
+      id: `${cat}-${idx}`,
+      title: it.title.split(" - ")[0],
+      source: it.title.split(" - ").pop() || "FlashFeed",
+      description: it.contentSnippet || "",
+      link: it.link,
       imageUrl: FALLBACK_IMAGES.all,
-      category
+      category: cat
     }));
 
-    articles = await fetchImagesParallel(articles, category);
-    setCache(category, articles);
+    articles = await processArticles(articles, cat);
+    cache.set(cat, { data: articles, time: Date.now() });
 
-    const start = (page - 1) * limit;
-    res.json({ articles: articles.slice(start, start + limit), total: articles.length });
+    res.json({ articles });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () => console.log(`⚡ FlashFeed Live on ${PORT}`));
+app.listen(5000, "0.0.0.0", () => console.log("🚀 Server Live on 5000"));
