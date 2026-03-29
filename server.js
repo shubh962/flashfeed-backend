@@ -8,26 +8,35 @@ const googleTrends = require("google-trends-api");
 const app = express();
 const parser = new Parser();
 
-// 1. Enable CORS for all origins (Crucial for Flutter Web)
 app.use(cors());
 
-/* ---------------- IMAGE EXTRACT ---------------- */
+/* ---------------- ENHANCED IMAGE SCRAPER ---------------- */
 async function getImageFromArticle(url) {
   try {
-    // Some sites block axios; we use a User-Agent to look like a browser
+    // Mimic a real browser to avoid being blocked
     const { data } = await axios.get(url, { 
-      timeout: 3000,
-      headers: { 'User-Agent': 'Mozilla/5.0' } 
+      timeout: 5000, 
+      headers: { 
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' 
+      } 
     });
     const $ = cheerio.load(data);
+    
+    // Priority 1: Open Graph Image
     const ogImage = $('meta[property="og:image"]').attr("content");
-    return ogImage || "";
+    if (ogImage) return ogImage;
+
+    // Priority 2: Twitter Image
+    const twitterImage = $('meta[name="twitter:image"]').attr("content");
+    if (twitterImage) return twitterImage;
+
+    return "";
   } catch {
     return "";
   }
 }
 
-/* ---------------- TRENDING ---------------- */
+/* ---------------- TRENDING LOGIC ---------------- */
 async function getTrendingTopics() {
   try {
     const data = await googleTrends.dailyTrends({ geo: "IN" });
@@ -35,7 +44,7 @@ async function getTrendingTopics() {
     const trends = parsed.default.trendingSearchesDays[0].trendingSearches;
     return trends.slice(0, 8).map((t) => t.title.query);
   } catch (e) {
-    return ["India", "Cricket", "Technology", "Bollywood", "Finance"];
+    return ["India", "World News", "Tech", "Sports", "Stocks"];
   }
 }
 
@@ -43,58 +52,45 @@ async function getTrendingTopics() {
 app.get("/news", async (req, res) => {
   try {
     let category = (req.query.category || "all").toLowerCase();
-    let keywordsToSearch = [];
+    let searchKeywords = (category === "all") ? await getTrendingTopics() : [category];
 
-    if (category === "all") {
-      keywordsToSearch = await getTrendingTopics();
-    } else {
-      keywordsToSearch = [category];
-    }
+    const results = [];
 
-    const newsResults = [];
-
-    // Fetch news for each keyword
-    for (let keyword of keywordsToSearch) {
+    for (let keyword of searchKeywords) {
       try {
         const feed = await parser.parseURL(
           `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=en-IN&gl=IN&ceid=IN:en`
         );
 
-        // Limit articles per keyword to keep response fast
-        const limit = category === "all" ? 2 : 10;
+        // Map items with images
+        const limit = (category === "all") ? 2 : 12;
         const items = await Promise.all(
           feed.items.slice(0, limit).map(async (item) => {
-            let image = await getImageFromArticle(item.link);
+            const image = await getImageFromArticle(item.link);
             
             return {
               title: item.title || "",
               description: item.contentSnippet || "",
               link: item.link || "",
               date: item.pubDate || "",
-              imageUrl: image || `https://picsum.photos/600/400?random=${Math.random()}`,
-              keyword: keyword, // 🔥 FIXED: Always include keyword for Flutter mapping
+              imageUrl: image || `https://picsum.photos/seed/${Math.random()}/600/400`,
+              keyword: keyword,
             };
           })
         );
-        newsResults.push(...items);
+        results.push(...items);
       } catch (err) {
-        console.log(`❌ Keyword ${keyword} failed`);
+        console.log(`Failed for ${keyword}`);
       }
     }
 
-    res.json(newsResults);
-
+    res.json(results);
   } catch (error) {
-    console.error("🔥 API ERROR:", error);
-    res.status(500).json({ error: "Internal Server Error" });
+    res.status(500).json({ error: "Server Error" });
   }
 });
 
-app.get("/", (req, res) => {
-  res.send("🚀 FlashFeed Backend is Live!");
-});
+app.get("/", (req, res) => res.send("FlashFeed API v2 - Inshorts Mode"));
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Port ${PORT}`));
