@@ -3,72 +3,106 @@ const Parser = require("rss-parser");
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const googleTrends = require("google-trends-api");
 
 const app = express();
 const parser = new Parser();
 
 app.use(cors());
 
-// 🔥 Extract image from article
+// 🔥 Get image
 async function getImageFromArticle(url) {
   try {
     const { data } = await axios.get(url, { timeout: 4000 });
     const $ = cheerio.load(data);
 
-    const ogImage = $('meta[property="og:image"]').attr("content");
-    if (ogImage) return ogImage;
-
-    const img = $("img").first().attr("src");
-    return img || "";
-  } catch (e) {
+    return $('meta[property="og:image"]').attr("content") || "";
+  } catch {
     return "";
+  }
+}
+
+// 🔥 Get trending topics (India)
+async function getTrendingTopics() {
+  try {
+    const data = await googleTrends.dailyTrends({
+      geo: "IN",
+    });
+
+    const parsed = JSON.parse(data);
+
+    const trends =
+      parsed.default.trendingSearchesDays[0].trendingSearches;
+
+    return trends.slice(0, 5).map((t) => t.title.query);
+  } catch (e) {
+    console.log("Trends error:", e);
+    return ["India", "Technology", "Business"];
   }
 }
 
 // 👉 API
 app.get("/news", async (req, res) => {
   try {
-    const category = (req.query.category || "general").toLowerCase();
+    let category = (req.query.category || "general").toLowerCase();
 
-    const urls = {
-      business: "https://news.google.com/rss/search?q=business&hl=en-IN&gl=IN&ceid=IN:en",
-      technology: "https://news.google.com/rss/search?q=technology&hl=en-IN&gl=IN&ceid=IN:en",
-      sports: "https://news.google.com/rss/search?q=sports&hl=en-IN&gl=IN&ceid=IN:en",
-      india: "https://news.google.com/rss/search?q=india&hl=en-IN&gl=IN&ceid=IN:en",
-      world: "https://news.google.com/rss/search?q=world&hl=en-IN&gl=IN&ceid=IN:en",
-      entertainment: "https://news.google.com/rss/search?q=entertainment&hl=en-IN&gl=IN&ceid=IN:en",
-      science: "https://news.google.com/rss/search?q=science&hl=en-IN&gl=IN&ceid=IN:en",
-      health: "https://news.google.com/rss/search?q=health&hl=en-IN&gl=IN&ceid=IN:en",
-      general: "https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en"
-    };
+    if (category === "all") {
+      // 🔥 DYNAMIC TRENDING NEWS
+      const trends = await getTrendingTopics();
 
-    const feedUrl = urls[category] || urls.general;
+      const news = [];
 
-    const feed = await parser.parseURL(feedUrl);
+      for (let keyword of trends) {
+        const feed = await parser.parseURL(
+          `https://news.google.com/rss/search?q=${encodeURIComponent(
+            keyword
+          )}&hl=en-IN&gl=IN&ceid=IN:en`
+        );
+
+        const items = await Promise.all(
+          feed.items.slice(0, 1).map(async (item) => {
+            let image = await getImageFromArticle(item.link);
+
+            if (!image) {
+              image = `https://picsum.photos/600/400?random=${Math.random()}`;
+            }
+
+            return {
+              title: item.title,
+              description: item.contentSnippet,
+              link: item.link,
+              date: item.pubDate,
+              imageUrl: image,
+              keyword: keyword, // 🔥 show trend
+            };
+          })
+        );
+
+        news.push(...items);
+      }
+
+      return res.json(news);
+    }
+
+    // 👉 NORMAL CATEGORY NEWS
+    const feed = await parser.parseURL(
+      `https://news.google.com/rss/search?q=${category}&hl=en-IN&gl=IN&ceid=IN:en`
+    );
 
     const news = await Promise.all(
       feed.items.slice(0, 5).map(async (item) => {
-
-        let image = "";
-
-        if (item.enclosure?.url) {
-          image = item.enclosure.url;
-        }
-
-        if (!image && item.link) {
-          image = await getImageFromArticle(item.link);
-        }
+        let image = await getImageFromArticle(item.link);
 
         if (!image) {
           image = `https://picsum.photos/600/400?random=${Math.random()}`;
         }
 
         return {
-          title: item.title || "",
-          description: item.contentSnippet || "",
-          link: item.link || "",
-          date: item.pubDate || "",
-          imageUrl: image
+          title: item.title,
+          description: item.contentSnippet,
+          link: item.link,
+          date: item.pubDate,
+          imageUrl: image,
         };
       })
     );
@@ -83,10 +117,9 @@ app.get("/news", async (req, res) => {
 
 // root
 app.get("/", (req, res) => {
-  res.send("News API is running 🚀");
+  res.send("🔥 FlashFeed AI Trending API running");
 });
 
-// 🔥 FIX HERE (IMPORTANT)
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, "0.0.0.0", () => {
