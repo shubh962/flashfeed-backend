@@ -49,11 +49,11 @@ async function fetchDetails(rawUrl, category) {
     });
     const $ = cheerio.load(data);
 
+    // Image
     let img =
       $('meta[property="og:image"]').attr("content") ||
       $('meta[name="twitter:image"]').attr("content") || "";
 
-    // ── FIX 1: Reject Google logo / icons / bad images ───────────────────────
     const isBadImage =
       !img ||
       img.includes("google.com") ||
@@ -65,14 +65,27 @@ async function fetchDetails(rawUrl, category) {
 
     if (isBadImage) img = FALLBACK_IMAGES[category] || FALLBACK_IMAGES.all;
 
-    // Body text
-    let bodyText = "";
+    // ── ONLY CHANGE: 5-6 lines of clean content ──────────────────────────────
+    const sentences = [];
     $('p').each((i, el) => {
       const txt = $(el).text().trim();
-      if (txt.length > 80 && bodyText.length < 450) bodyText += txt + " ";
+
+      // Skip garbage lines
+      if (txt.length < 40) return;                          // too short
+      if (txt.includes("cookie") || txt.includes("Cookie")) return; // cookie notice
+      if (txt.includes("subscribe") || txt.includes("Subscribe")) return;
+      if (txt.includes("©") || txt.includes("All rights")) return;
+      if (txt.includes("Click here") || txt.includes("Read more")) return;
+      if (txt.includes("Advertisement")) return;
+
+      sentences.push(txt);
+      if (sentences.length === 5) return false; // stop at 5 sentences (jQuery exit)
     });
 
-    return { img, bodyText: bodyText.trim() };
+    const bodyText = sentences.join(" ").substring(0, 600).trim();
+    // ─────────────────────────────────────────────────────────────────────────
+
+    return { img, bodyText };
   } catch {
     return { img: FALLBACK_IMAGES[category] || FALLBACK_IMAGES.all, bodyText: "" };
   }
@@ -92,9 +105,8 @@ async function processArticlesBackground(articles, cat) {
       }
     });
   }
-  // Update cache with enriched data
   cache.set(cat, { data: articles, time: Date.now() });
-  console.log(`✅ Images loaded for [${cat}]`);
+  console.log(`✅ Images + content loaded for [${cat}]`);
 }
 
 // ── /news ENDPOINT ───────────────────────────────────────────────────────────
@@ -112,38 +124,31 @@ app.get("/news", async (req, res) => {
 
     let items = feeds.filter(f => f.status === "fulfilled").flatMap(f => f.value.items || []);
 
-    // Deduplicate
     const seen = new Set();
     items = items.filter(it => {
       const key = it.title.substring(0, 35).toLowerCase();
       return seen.has(key) ? false : seen.add(key);
     }).slice(0, 40);
 
-    // ── FIX 2: Return articles INSTANTLY with fallback image ─────────────────
-    // Flutter gets data immediately, no waiting for images
     let articles = items.map((it, idx) => ({
       id: `${cat}-${idx}`,
       title: it.title.split(" - ")[0],
       source: it.title.split(" - ").pop() || "FlashFeed",
       description: it.contentSnippet || "",
       link: it.link,
-      imageUrl: FALLBACK_IMAGES[cat] || FALLBACK_IMAGES.all, // nice fallback first
+      imageUrl: FALLBACK_IMAGES[cat] || FALLBACK_IMAGES.all,
       category: cat
     }));
 
-    // Save to cache immediately so Flutter gets it fast
     cache.set(cat, { data: articles, time: Date.now() });
-
-    // Send response NOW — don't wait for images
     res.json({ articles });
 
-    // Then fetch real images in background (lazy load)
     processArticlesBackground(articles, cat);
 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── /images endpoint — Flutter polls this after 5s to get updated images ─────
+// ── /images endpoint ─────────────────────────────────────────────────────────
 app.get("/images", (req, res) => {
   const cat = (req.query.category || "all").toLowerCase();
   const entry = cache.get(cat);
