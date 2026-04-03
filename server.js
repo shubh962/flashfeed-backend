@@ -10,27 +10,43 @@ app.use(cors());
 app.use(express.json());
 
 const cache = new Map();
-const CACHE_TTL = 10 * 60 * 1000; 
+const CACHE_TTL = 15 * 60 * 1000; 
 
 const bot = axios.create({
-  timeout: 5000, // Increased for stability
-  headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
-  maxContentLength: 600000,
+  timeout: 5000, 
+  headers: { 
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+  },
+  maxContentLength: 1000000, // Increased to 1MB for deep scraping
 });
 
-// ── FEATURE: Professional Formatting (Strict 80-90 Words) ──────────────────
-function formatProfessional(text, fallback) {
-  const content = (text && text.length > 100) ? text : fallback;
-  const clean = content.replace(/\s+/g, " ").replace(/\[.*?\]/g, "").trim();
+const RSS_SOURCES = {
+  india: ["https://news.google.com/rss/search?q=india&hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.feedburner.com/ndtvnews-india-news", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"],
+  world: ["https://news.google.com/rss/search?q=world&hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.bbci.co.uk/news/world/rss.xml"],
+  technology: ["https://news.google.com/rss/search?q=technology&hl=en-IN&gl=IN&ceid=IN:en", "https://techcrunch.com/feed/"],
+  business: ["https://news.google.com/rss/search?q=business&hl=en-IN&gl=IN&ceid=IN:en", "https://economictimes.indiatimes.com/rssfeedstopstories.cms"],
+  sports: ["https://news.google.com/rss/search?q=sports&hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.feedburner.com/ndtvsports-latest"],
+  all: ["https://news.google.com/rss?hl=en-IN&gl=IN&ceid=IN:en", "https://feeds.feedburner.com/ndtvnews-top-stories", "https://timesofindia.indiatimes.com/rssfeedstopstories.cms"]
+};
+
+const FALLBACK_IMAGES = {
+  all: "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=800"
+};
+
+// ── PROFESSIONAL FORMATTING (Strict 85 Words) ─────────────────────────────
+function formatText(text, rssSnippet) {
+  const baseText = (text && text.length > 150) ? text : (rssSnippet || "");
+  const clean = baseText.replace(/\s+/g, " ").replace(/\[.*?\]/g, "").trim();
   const words = clean.split(" ");
   
-  // 🔥 Strict Format: Har news 85 words ki hogi (approx 6 lines)
+  // Har news ko professional 85 words ka block banata hai
   if (words.length <= 85) return clean;
   return words.slice(0, 85).join(" ") + "...";
 }
 
-// ── FEATURE: Deep Scrape with High Priority for Images ──────────────────────
-async function scrapeDeep(url, category, rssSnippet = "") {
+// ── DEEP SCRAPER (Images + Full Content) ──────────────────────────────────
+async function scrapeDeep(url, rssSnippet) {
   try {
     let finalUrl = url;
     if (url.includes("news.google.com")) {
@@ -41,53 +57,54 @@ async function scrapeDeep(url, category, rssSnippet = "") {
     const { data } = await bot.get(finalUrl);
     const $ = cheerio.load(data);
 
-    // Image extraction logic
+    // Multiple image selectors for better success rate
     const img = $('meta[property="og:image"]').attr("content") || 
                 $('meta[name="twitter:image"]').attr("content") || 
-                $('meta[itemprop="image"]').attr("content") || "";
+                $('meta[itemprop="image"]').attr("content") || 
+                $('article img').first().attr("src") || "";
     
     let paragraphs = [];
     $('p').each((_, el) => {
       const txt = $(el).text().trim();
-      if (txt.length > 60 && paragraphs.length < 10) paragraphs.push(txt);
+      if (txt.length > 80 && paragraphs.length < 12) paragraphs.push(txt);
     });
 
     const fullText = paragraphs.join(" ");
     return { 
-      img: img.startsWith("http") ? img : "", 
-      summary: formatProfessional(fullText, rssSnippet),
+      img: (img && img.startsWith("http")) ? img : "", 
+      summary: formatText(fullText, rssSnippet),
       siteName: $('meta[property="og:site_name"]').attr("content") || "" 
     };
-  } catch {
-    return { img: "", summary: formatProfessional("", rssSnippet), siteName: "" };
+  } catch (e) {
+    return { img: "", summary: formatText("", rssSnippet), siteName: "" };
   }
 }
 
-// ── FEATURE: Auto-Loading / Background Enrichment ───────────────────────────
-async function autoLoadNext(articles, cat) {
-  // 🚀 Process in small chunks to keep server responsive
-  for (let i = 0; i < articles.length; i += 3) {
-    const batch = articles.slice(i, i + 3);
+// ── AUTO-ENRICHER (Infinite Load in Background) ───────────────────────────
+async function enrichAll(articles, cat) {
+  const BATCH_SIZE = 3; 
+  for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+    const batch = articles.slice(i, i + BATCH_SIZE);
     await Promise.all(batch.map(async (art) => {
-      if (art.description.length < 200 || art.imageUrl.includes("unsplash")) {
-        const details = await scrapeDeep(art.link, cat, art.description);
-        if (details.img) art.imageUrl = details.img;
-        art.description = details.summary;
-        if (details.siteName) art.source = details.siteName;
-      }
+      // Sirf unhe enrich karo jo abhi tak fallback par hain
+      const details = await scrapeDeep(art.link, art.description);
+      if (details.img) art.imageUrl = details.img;
+      art.description = details.summary; // 5-6 lines content
+      if (details.siteName) art.source = details.siteName;
     }));
-    // Save progress so user sees images while scrolling
+    // Har batch ke baad cache update karo taaki user ko result milte rahein
     cache.set(cat, { data: articles, time: Date.now() });
   }
 }
 
+// ── MAIN ROUTE ────────────────────────────────────────────────────────────
 app.get("/news", async (req, res) => {
   const cat = (req.query.category || "all").toLowerCase();
 
   if (cache.has(cat)) {
     const entry = cache.get(cat);
     if (Date.now() - entry.time < CACHE_TTL) {
-      // Shuffle for freshness on every refresh
+      // Shuffle on every refresh for "New News" feel
       const shuffled = [...entry.data].sort(() => Math.random() - 0.5);
       return res.json({ articles: shuffled });
     }
@@ -95,8 +112,8 @@ app.get("/news", async (req, res) => {
 
   try {
     const sources = RSS_SOURCES[cat] || RSS_SOURCES.all;
-    const feeds = await Promise.allSettled(sources.map(s => parser.parseURL(s)));
-    let items = feeds.filter(f => f.status === "fulfilled").flatMap(f => f.value?.items || []);
+    const feedResults = await Promise.allSettled(sources.map(s => parser.parseURL(s)));
+    let items = feedResults.filter(r => r.status === "fulfilled").flatMap(r => r.value.items || []);
 
     const seen = new Set();
     let articles = items.filter(it => {
@@ -108,18 +125,24 @@ app.get("/news", async (req, res) => {
       source: it.title.split(" - ").pop().trim() || "FlashFeed",
       description: it.contentSnippet || "",
       link: it.link,
-      imageUrl: FALLBACK_IMAGES[cat] || FALLBACK_IMAGES.all,
+      imageUrl: FALLBACK_IMAGES.all,
       category: cat
     }));
 
-    // 🔥 Fix: Send initial response FAST, then enrich in background
-    res.json({ articles: articles.sort(() => Math.random() - 0.5) });
+    // Respond INSTANTLY to user
+    res.json({ articles: [...articles].sort(() => Math.random() - 0.5) });
 
-    // Start background enrichment (Auto-load images/content)
-    autoLoadNext(articles, cat);
+    // Start full enrichment in background
+    enrichAll(articles, cat);
 
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok" }));
-app.listen(5000, "0.0.0.0", () => console.log("🚀 Turbo Server Live"));
+app.get("/health", (_, res) => res.json({ status: "ok", uptime: process.uptime() }));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`⚡ FlashFeed MAX running on ${PORT}`);
+});
